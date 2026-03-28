@@ -437,10 +437,17 @@ a {
 
 .message-row {
   display: flex;
+  transition: transform 0.18s ease;
 }
 
 .message-row--self {
   justify-content: flex-end;
+}
+
+.message-row--highlighted .message-card {
+  box-shadow:
+    0 0 0 2px rgba(213, 92, 63, 0.28),
+    var(--shadow);
 }
 
 .message-card {
@@ -466,6 +473,54 @@ a {
   font-size: 0.86rem;
 }
 
+.message-meta__actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.message-action {
+  border: 0;
+  background: transparent;
+  color: var(--accent-dark);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+}
+
+.reply-block,
+.reply-composer {
+  border-radius: 16px;
+  border: 1px solid rgba(24, 51, 45, 0.1);
+  background: rgba(24, 51, 45, 0.045);
+}
+
+.reply-block {
+  width: 100%;
+  display: grid;
+  gap: 6px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  border-left: 4px solid rgba(213, 92, 63, 0.5);
+  text-align: left;
+  cursor: pointer;
+}
+
+.reply-block small,
+.reply-composer small {
+  color: var(--accent-dark);
+  font-size: 0.82rem;
+}
+
+.reply-block span,
+.reply-composer strong {
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 600;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
 .message-body {
   color: var(--text);
   word-break: break-word;
@@ -474,6 +529,20 @@ a {
 .composer-card {
   display: grid;
   gap: 14px;
+}
+
+.reply-composer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-left: 4px solid var(--accent);
+}
+
+.reply-composer__text {
+  display: grid;
+  gap: 4px;
 }
 
 .aside-card {

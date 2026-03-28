@@ -9,6 +9,8 @@ import (
 
 const (
 	ConversationKindGroup  = "group"
+	MessageKindFile        = "file"
+	MessageKindImage       = "image"
 	MessageKindText        = "text"
 	ConversationRoleOwner  = "owner"
 	ConversationRoleAdmin  = "admin"
@@ -46,6 +48,14 @@ type Message struct {
 	Content        string          `json:"content"`
 	Metadata       json.RawMessage `json:"metadata"`
 	CreatedAt      time.Time       `json:"created_at"`
+}
+
+// ReplyReference 表示消息中携带的引用摘要。
+type ReplyReference struct {
+	MessageID uuid.UUID `json:"message_id"`
+	SenderID  string    `json:"sender_id"`
+	Kind      string    `json:"kind"`
+	Content   string    `json:"content"`
 }
 
 type CreateConversationInput struct {

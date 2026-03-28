@@ -221,6 +221,30 @@ func (r *PostgresRepository) AddConversationMembers(ctx context.Context, input A
 	return added, nil
 }
 
+func (r *PostgresRepository) GetMessage(ctx context.Context, conversationID uuid.UUID, messageID uuid.UUID) (Message, error) {
+	var message Message
+	err := r.db.QueryRow(ctx, `
+		SELECT id, conversation_id, sender_id, kind, content, metadata, created_at
+		FROM messages
+		WHERE conversation_id = $1 AND id = $2
+	`, conversationID, messageID).Scan(
+		&message.ID,
+		&message.ConversationID,
+		&message.SenderID,
+		&message.Kind,
+		&message.Content,
+		&message.Metadata,
+		&message.CreatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Message{}, errors.New("被引用消息不存在")
+	}
+	if err != nil {
+		return Message{}, fmt.Errorf("查询消息失败: %w", err)
+	}
+	return message, nil
+}
+
 func (r *PostgresRepository) CreateMessage(ctx context.Context, input SendMessageInput) (Message, error) {
 	metadata := input.Metadata
 	if len(metadata) == 0 {

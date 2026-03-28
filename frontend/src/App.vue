@@ -19,6 +19,7 @@ const activeConversationId = ref('')
 const messages = ref([])
 const members = ref([])
 const composer = ref('')
+const replyTarget = ref(null)
 const conversationBusy = ref(false)
 const memberBusy = ref(false)
 const sendBusy = ref(false)
@@ -49,6 +50,8 @@ let statusTimer = null
 let manualClose = false
 let knownMessageIds = new Set()
 let subscribedConversationId = ''
+let highlightTimer = null
+const highlightedMessageId = ref('')
 
 const activeConversation = computed(() =>
   conversations.value.find((conversation) => conversation.id === activeConversationId.value) || null
@@ -117,6 +120,7 @@ function clearSession() {
   messages.value = []
   members.value = []
   composer.value = ''
+  replyTarget.value = null
   createForm.name = ''
   createForm.selectedUsers = []
   inviteUsers.value = []
@@ -196,6 +200,7 @@ async function loadConversations(keepSelection = true) {
     activeConversationId.value = ''
     messages.value = []
     members.value = []
+    replyTarget.value = null
     knownMessageIds = new Set()
     return
   }
@@ -219,6 +224,9 @@ async function openConversation(conversationId) {
   workspaceError.value = ''
   conversationBusy.value = true
   memberBusy.value = true
+  if (replyTarget.value && previousConversationId !== conversationId) {
+    replyTarget.value = null
+  }
 
   if (previousConversationId && previousConversationId !== conversationId) {
     sendSocketMessage({
@@ -348,13 +356,21 @@ function sendSocketMessage(payload) {
   ws.value.send(JSON.stringify(payload))
 }
 
-async function sendMessage(customContent = '') {
+async function sendMessage(options = {}) {
   if (!activeConversationId.value) {
     return
   }
 
-  const content = (customContent || composer.value).trim()
+  const normalizedOptions =
+    typeof options === 'string'
+      ? {
+          content: options
+        }
+      : options
+
+  const content = (normalizedOptions.content ?? composer.value).trim()
   if (!content) {
+    workspaceError.value = replyTarget.value ? '请输入回复内容' : '消息内容不能为空'
     return
   }
 
@@ -362,15 +378,25 @@ async function sendMessage(customContent = '') {
   workspaceError.value = ''
 
   try {
+    const metadata = { ...(normalizedOptions.metadata || {}) }
+    if (replyTarget.value?.id) {
+      metadata.reply = {
+        message_id: replyTarget.value.id
+      }
+    }
+
     const message = await apiRequest(`/conversations/${activeConversationId.value}/messages`, {
       method: 'POST',
       token: sessionToken.value,
       body: {
-        content
+        kind: normalizedOptions.kind,
+        content,
+        metadata: Object.keys(metadata).length ? metadata : undefined
       }
     })
 
     composer.value = ''
+    replyTarget.value = null
     if (!knownMessageIds.has(message.id)) {
       messages.value = [...messages.value, message]
       knownMessageIds.add(message.id)
@@ -406,7 +432,9 @@ async function handleAttachmentUpload(event) {
       body: formData
     })
 
-    await sendMessage(`上传了附件：${uploaded.original_name}\n${uploaded.public_url}`)
+    await sendMessage({
+      content: `上传了附件：${uploaded.original_name}\n${uploaded.public_url}`
+    })
   } catch (error) {
     workspaceError.value = error.message
   } finally {
@@ -539,6 +567,74 @@ function senderLabel(message) {
     return '我'
   }
   return memberDirectory.value.get(message.sender_id) || shortId(message.sender_id)
+}
+
+function replyLabel(reply) {
+  if (!reply?.sender_id) {
+    return '未知用户'
+  }
+  if (reply.sender_id === currentUser.value?.id) {
+    return '我'
+  }
+  return memberDirectory.value.get(reply.sender_id) || shortId(reply.sender_id)
+}
+
+function extractReply(message) {
+  const reply = message?.metadata?.reply
+  if (!reply || typeof reply !== 'object' || !reply.message_id) {
+    return null
+  }
+  return reply
+}
+
+function replySnippet(reply) {
+  if (!reply) {
+    return ''
+  }
+
+  const content = (reply.content || '').trim()
+  if (reply.kind === 'image') {
+    return content || '[图片]'
+  }
+  if (reply.kind === 'file') {
+    return content || '[文件]'
+  }
+  return content || '[无文本内容]'
+}
+
+function beginReply(message) {
+  replyTarget.value = {
+    id: message.id,
+    sender_id: message.sender_id,
+    kind: message.kind,
+    content: message.content
+  }
+}
+
+function cancelReply() {
+  replyTarget.value = null
+}
+
+function scrollToMessage(messageId) {
+  if (!messageId) {
+    return
+  }
+
+  const element = document.getElementById(`message-${messageId}`)
+  if (!element) {
+    return
+  }
+
+  element.scrollIntoView({
+    behavior: 'smooth',
+    block: 'center'
+  })
+
+  highlightedMessageId.value = messageId
+  clearTimeout(highlightTimer)
+  highlightTimer = setTimeout(() => {
+    highlightedMessageId.value = ''
+  }, 1800)
 }
 </script>
 
@@ -742,14 +838,30 @@ function senderLabel(message) {
             <article
               v-for="message in messages"
               :key="message.id"
+              :id="`message-${message.id}`"
               class="message-row"
-              :class="{ 'message-row--self': message.sender_id === currentUser.id }"
+              :class="{
+                'message-row--self': message.sender_id === currentUser.id,
+                'message-row--highlighted': highlightedMessageId === message.id
+              }"
             >
               <div class="message-card">
                 <header class="message-meta">
                   <strong>{{ senderLabel(message) }}</strong>
-                  <span>{{ formatTime(message.created_at) }}</span>
+                  <div class="message-meta__actions">
+                    <span>{{ formatTime(message.created_at) }}</span>
+                    <button type="button" class="message-action" @click="beginReply(message)">引用</button>
+                  </div>
                 </header>
+                <button
+                  v-if="extractReply(message)"
+                  type="button"
+                  class="reply-block"
+                  @click="scrollToMessage(extractReply(message).message_id)"
+                >
+                  <small>回复 {{ replyLabel(extractReply(message)) }}</small>
+                  <span>{{ replySnippet(extractReply(message)) }}</span>
+                </button>
                 <div class="message-body" v-html="renderMessageHtml(message.content)"></div>
               </div>
             </article>
@@ -761,10 +873,22 @@ function senderLabel(message) {
           </section>
 
           <footer class="composer-card">
+            <div v-if="replyTarget" class="reply-composer">
+              <div class="reply-composer__text">
+                <small>正在回复 {{ replyLabel(replyTarget) }}</small>
+                <strong>{{ replySnippet(replyTarget) }}</strong>
+              </div>
+              <button type="button" class="ghost-btn" @click="cancelReply">取消引用</button>
+            </div>
+
             <textarea
               v-model="composer"
               class="composer-input"
-              placeholder="输入消息，按 Enter 发送，Shift + Enter 换行"
+              :placeholder="
+                replyTarget
+                  ? '输入回复内容，按 Enter 发送，Shift + Enter 换行'
+                  : '输入消息，按 Enter 发送，Shift + Enter 换行'
+              "
               @keydown.enter.exact.prevent="sendMessage()"
             />
 

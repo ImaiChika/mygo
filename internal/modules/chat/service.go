@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/google/uuid"
@@ -150,7 +151,12 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Mess
 	if input.Kind == "" {
 		input.Kind = MessageKindText
 	}
-	if input.Content == "" {
+
+	normalizedMetadata, replyToMessageID, err := normalizeOutgoingMetadata(input.Metadata)
+	if err != nil {
+		return Message{}, err
+	}
+	if input.Content == "" && len(normalizedMetadata) == 0 {
 		return Message{}, errors.New("消息内容不能为空")
 	}
 
@@ -161,6 +167,21 @@ func (s *Service) SendMessage(ctx context.Context, input SendMessageInput) (Mess
 	if !allowed {
 		return Message{}, errors.New("当前用户不属于该会话")
 	}
+
+	if replyToMessageID != nil {
+		referencedMessage, err := s.repo.GetMessage(ctx, input.ConversationID, *replyToMessageID)
+		if err != nil {
+			return Message{}, fmt.Errorf("查询被引用消息失败: %w", err)
+		}
+
+		enrichedMetadata, err := withReplyReference(normalizedMetadata, referencedMessage)
+		if err != nil {
+			return Message{}, err
+		}
+		normalizedMetadata = enrichedMetadata
+	}
+
+	input.Metadata = normalizedMetadata
 
 	message, err := s.repo.CreateMessage(ctx, input)
 	if err != nil {
@@ -231,4 +252,87 @@ func (s *Service) MarkConversationRead(ctx context.Context, input MarkConversati
 	}
 
 	return s.repo.MarkConversationRead(ctx, input)
+}
+
+func normalizeOutgoingMetadata(raw json.RawMessage) (json.RawMessage, *uuid.UUID, error) {
+	if len(raw) == 0 {
+		return nil, nil, nil
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return nil, nil, errors.New("消息元数据格式错误")
+	}
+
+	replyValue, ok := metadata["reply"]
+	if !ok {
+		normalized, err := json.Marshal(metadata)
+		if err != nil {
+			return nil, nil, errors.New("消息元数据序列化失败")
+		}
+		return normalized, nil, nil
+	}
+
+	replyMap, ok := replyValue.(map[string]any)
+	if !ok {
+		return nil, nil, errors.New("reply 元数据格式错误")
+	}
+
+	rawMessageID, ok := replyMap["message_id"].(string)
+	if !ok || strings.TrimSpace(rawMessageID) == "" {
+		return nil, nil, errors.New("reply.message_id 不能为空")
+	}
+
+	messageID, err := uuid.Parse(strings.TrimSpace(rawMessageID))
+	if err != nil {
+		return nil, nil, errors.New("reply.message_id 无效")
+	}
+
+	delete(metadata, "reply")
+	normalized, err := json.Marshal(metadata)
+	if err != nil {
+		return nil, nil, errors.New("消息元数据序列化失败")
+	}
+
+	if string(normalized) == "{}" {
+		normalized = nil
+	}
+
+	return normalized, &messageID, nil
+}
+
+func withReplyReference(raw json.RawMessage, referenced Message) (json.RawMessage, error) {
+	metadata := make(map[string]any)
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &metadata); err != nil {
+			return nil, errors.New("消息元数据格式错误")
+		}
+	}
+
+	replyContent := referenced.Content
+	if trimmed := strings.TrimSpace(replyContent); trimmed == "" {
+		replyContent = "[无文本内容]"
+	}
+	runes := []rune(replyContent)
+	if len(runes) > 120 {
+		replyContent = string(runes[:120]) + "..."
+	}
+
+	reply := map[string]any{
+		"message_id": referenced.ID.String(),
+		"sender_id":  referenced.SenderID,
+		"kind":       referenced.Kind,
+		"content":    replyContent,
+	}
+
+	merged := make(map[string]any, len(metadata)+1)
+	maps.Copy(merged, metadata)
+	merged["reply"] = reply
+
+	normalized, err := json.Marshal(merged)
+	if err != nil {
+		return nil, errors.New("消息元数据序列化失败")
+	}
+
+	return normalized, nil
 }

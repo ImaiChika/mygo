@@ -21,6 +21,7 @@ type stubRepository struct {
 	getMemberFn             func(ctx context.Context, conversationID string, userID string) (ConversationMember, error)
 	listMembersFn           func(ctx context.Context, conversationID string) ([]ConversationMember, error)
 	addMembersFn            func(ctx context.Context, input AddConversationMembersInput) ([]ConversationMember, error)
+	getMessageFn            func(ctx context.Context, conversationID uuid.UUID, messageID uuid.UUID) (Message, error)
 	createMessageFn         func(ctx context.Context, input SendMessageInput) (Message, error)
 	listMessagesFn          func(ctx context.Context, query ListMessagesQuery) ([]Message, error)
 	markReadFn              func(ctx context.Context, input MarkConversationReadInput) (ReadState, error)
@@ -49,6 +50,10 @@ func (s *stubRepository) ListConversationMembers(ctx context.Context, conversati
 
 func (s *stubRepository) AddConversationMembers(ctx context.Context, input AddConversationMembersInput) ([]ConversationMember, error) {
 	return s.addMembersFn(ctx, input)
+}
+
+func (s *stubRepository) GetMessage(ctx context.Context, conversationID uuid.UUID, messageID uuid.UUID) (Message, error) {
+	return s.getMessageFn(ctx, conversationID, messageID)
 }
 
 func (s *stubRepository) CreateMessage(ctx context.Context, input SendMessageInput) (Message, error) {
@@ -92,6 +97,7 @@ func TestCreateConversationDeduplicatesMembers(t *testing.T) {
 		getMemberFn:         func(context.Context, string, string) (ConversationMember, error) { return ConversationMember{}, nil },
 		listMembersFn:       func(context.Context, string) ([]ConversationMember, error) { return nil, nil },
 		addMembersFn:        func(context.Context, AddConversationMembersInput) ([]ConversationMember, error) { return nil, nil },
+		getMessageFn:        func(context.Context, uuid.UUID, uuid.UUID) (Message, error) { return Message{}, nil },
 		createMessageFn:     func(context.Context, SendMessageInput) (Message, error) { return Message{}, nil },
 		listMessagesFn:      func(context.Context, ListMessagesQuery) ([]Message, error) { return nil, nil },
 		markReadFn:          func(context.Context, MarkConversationReadInput) (ReadState, error) { return ReadState{}, nil },
@@ -151,6 +157,9 @@ func TestSendMessagePublishesEvent(t *testing.T) {
 		addMembersFn: func(context.Context, AddConversationMembersInput) ([]ConversationMember, error) {
 			return nil, nil
 		},
+		getMessageFn: func(context.Context, uuid.UUID, uuid.UUID) (Message, error) {
+			return Message{}, nil
+		},
 		markReadFn: func(context.Context, MarkConversationReadInput) (ReadState, error) {
 			return ReadState{}, nil
 		},
@@ -181,5 +190,78 @@ func TestSendMessagePublishesEvent(t *testing.T) {
 	}
 	if payload["conversation_id"] == nil {
 		t.Fatalf("事件负载中缺少 conversation_id")
+	}
+}
+
+func TestSendMessageWithReplyEnrichesMetadata(t *testing.T) {
+	conversationID := uuid.New()
+	replyMessageID := uuid.New()
+	now := time.Now()
+	var capturedInput SendMessageInput
+
+	repo := &stubRepository{
+		createConversationFn: func(context.Context, CreateConversationInput) (Conversation, error) { return Conversation{}, nil },
+		listConversationsFn:  func(context.Context, string) ([]Conversation, error) { return nil, nil },
+		isMemberFn:           func(context.Context, string, string) (bool, error) { return true, nil },
+		getMemberFn:          func(context.Context, string, string) (ConversationMember, error) { return ConversationMember{}, nil },
+		listMembersFn:        func(context.Context, string) ([]ConversationMember, error) { return nil, nil },
+		addMembersFn:         func(context.Context, AddConversationMembersInput) ([]ConversationMember, error) { return nil, nil },
+		getMessageFn: func(_ context.Context, gotConversationID uuid.UUID, gotMessageID uuid.UUID) (Message, error) {
+			if gotConversationID != conversationID || gotMessageID != replyMessageID {
+				t.Fatalf("引用查询参数异常: %s %s", gotConversationID, gotMessageID)
+			}
+			return Message{
+				ID:             replyMessageID,
+				ConversationID: conversationID,
+				SenderID:       "u-2",
+				Kind:           MessageKindText,
+				Content:        "被引用的原始消息",
+				CreatedAt:      now.Add(-time.Minute),
+			}, nil
+		},
+		createMessageFn: func(_ context.Context, input SendMessageInput) (Message, error) {
+			capturedInput = input
+			return Message{
+				ID:             uuid.New(),
+				ConversationID: input.ConversationID,
+				SenderID:       input.SenderID,
+				Kind:           input.Kind,
+				Content:        input.Content,
+				Metadata:       input.Metadata,
+				CreatedAt:      now,
+			}, nil
+		},
+		listMessagesFn: func(context.Context, ListMessagesQuery) ([]Message, error) { return nil, nil },
+		markReadFn:     func(context.Context, MarkConversationReadInput) (ReadState, error) { return ReadState{}, nil },
+	}
+
+	service := NewService(repo, &stubBus{})
+	message, err := service.SendMessage(context.Background(), SendMessageInput{
+		ConversationID: conversationID,
+		SenderID:       "u-1",
+		Content:        "这是回复",
+		Metadata:       json.RawMessage(`{"reply":{"message_id":"` + replyMessageID.String() + `"}}`),
+	})
+	if err != nil {
+		t.Fatalf("SendMessage 返回错误: %v", err)
+	}
+
+	var metadata map[string]any
+	if err := json.Unmarshal(capturedInput.Metadata, &metadata); err != nil {
+		t.Fatalf("解析写入元数据失败: %v", err)
+	}
+
+	reply, ok := metadata["reply"].(map[string]any)
+	if !ok {
+		t.Fatalf("reply 元数据不存在")
+	}
+	if got := reply["sender_id"]; got != "u-2" {
+		t.Fatalf("reply.sender_id 不正确: %v", got)
+	}
+	if got := reply["content"]; got != "被引用的原始消息" {
+		t.Fatalf("reply.content 不正确: %v", got)
+	}
+	if len(message.Metadata) == 0 {
+		t.Fatalf("返回消息应包含引用元数据")
 	}
 }
